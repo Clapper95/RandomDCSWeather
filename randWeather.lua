@@ -17,17 +17,10 @@
     **Notes**
             This only changes individual fields. wind, groundTurbulance, qnh, clouds, season/temperature, and start_time. It does not touch anything fog related as fog should be set to AUTO in the mission editor if you wish to have fog.
             Test manually first. If you have your 7z path messed up, there will be no error on DCS.
-
-    **Configurable Lines**
-    -Ln 41-44
-            7-Zip, missionA, missionB, your serversettings.lua path
-    -Ln 59
-            Chance of bad weather (0 for never bad weather, 1 for always bad weather, in between is chance)
-    -Ln 85-87
-            This is randomness of wind. Ln 84 is at ground for runways and carriers. change the rnd(0,359) for direction and rnd(0,8) for speed
-    Ln 99
-            Chance of night time (same as bad weather)
-    
+            This script automatically backs up your .miz so if anything were to happen you would have a fall back.
+                Each time this script runs, it first checks that the SOURCE .miz is not already corrupted. Then it builds and patches a disposable staging copy, and integrity-checks THAT copy with 7z before committing anything. 
+                    The live .miz file is never opened for writing unless a verified-good staging copy is ready to replace it. If the source is already bad, or every attempt fails to produce a verified-good copy,
+                        the live .miz and serverSettings.lua are both left completely unchanged - nothing is auto-reverted, the previous configuration just stays in effect for the next restart. 
 --]]
 
 local sevenZip    = [[C:\Program Files\7-Zip\7z.exe]]
@@ -35,6 +28,11 @@ local missionA    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz.miz]]
 local missionB    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz_b.miz]]
 local serverSettingPath = [[C:\Users\YourUser\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
 local workDir     = (lfs and lfs.writedir() or os.getenv("TEMP") .. "\\") .. "randomizeWeatherTMP\\"
+local maxAttempts = 2
+
+-- Chance Configuration
+local nightChance = 0.12
+local badWeatherChance = 0.25
 
 local function log(msg)
     local f = io.open((lfs and lfs.writedir() or "") .. "Logs\\randomizeWeather.log", "a")
@@ -48,11 +46,11 @@ local function rnd(min, max) return math.random(min, max) end
 local function rndf(min, max) return min + math.random() * (max - min) end
 local function pick(t) return t[math.random(#t)] end
 
-local badWeatherChance = 0.25
 local goodRegimes = {"clear", "scattered"}
 local badRegimes  = {"overcast", "rain", "storm"}
 
 local function buildWeather()
+    log("LOG: Picking Weather")
     local isBad = math.random() < badWeatherChance
     local regime = isBad and pick(badRegimes) or pick(goodRegimes)
 
@@ -88,9 +86,10 @@ local function buildWeather()
     }
 end
 
-local nightChance = 0.12
+
 
 local function pickStartTime()
+    log("LOG: Picking Start Time")
     if math.random() < nightChance then
         local t = rnd(20 * 3600, 28 * 3600)
         return t % 86400
@@ -158,20 +157,33 @@ local function copyFile(src, dst)
 end
 
 -- Patch weather 
-local function randomizeInPlace(mizPath)
-    os.execute('mkdir "' .. workDir .. '" 2>nul')
-    local missionPath = workDir .. "mission"
-    os.remove(missionPath)
+local function verifyMiz(mizPath)
+    local testCmd = string.format('""%s" t "%s" > "%s7zTestOutput.log" 2>&1"', sevenZip, mizPath, workDir)
+    local testResult = os.execute(testCmd)
+    log("Integrity test on: " .. mizPath .. " result: " .. tostring(testResult))
+    return testResult == 0 or testResult == true
+end
 
-    local extractCmd = string.format('""%s" e -y -o"%s" "%s" mission"', sevenZip, workDir, mizPath)
-    local extractResult = os.execute(extractCmd)
-    log("Extract from " .. mizPath .. " result: " .. tostring(extractResult))
-    if extractResult ~= 0 and extractResult ~= true then
-        log("ERROR: extraction failed for " .. mizPath)
+local function buildAndVerify(mizPath)
+    local stagingMiz = workDir .. "staging.miz"
+    os.remove(stagingMiz)
+    local copyOk, copyErr = copyFile(mizPath, stagingMiz)
+    if not copyOk then
+        log("ERROR: could not create a staging copy")
         return false
     end
 
-    local f = io.open(missionPath, "rb")
+    local missionPath = workDir .. "mission"
+    os.remove(missionPath)
+        local extractCmd = string.format('""%s" e -y -o"%s" "%s" mission"', sevenZip, workDir, stagingMiz)
+    local extractResult = os.execute(extractCmd)
+    log("Extract from staging copy result: " .. tostring(extractResult))
+    if extractResult ~= 0 and extractResult ~= true then
+        log("ERROR: extraction failed from staging copy of " .. mizPath)
+        return false
+    end
+
+        local f = io.open(missionPath, "rb")
     if not f then
         log("ERROR: could not open extracted mission at " .. missionPath)
         return false
@@ -194,7 +206,6 @@ local function randomizeInPlace(mizPath)
     outF:write(patched)
     outF:close()
 
-    -- Repack the modified mission into the inactive .miz file.
     local batPath = workDir .. "repack.bat"
     local batFile = io.open(batPath, "w")
     if not batFile then
@@ -203,20 +214,50 @@ local function randomizeInPlace(mizPath)
     end
     batFile:write('@echo off\r\n')
     batFile:write('cd /d "' .. workDir .. '"\r\n')
-    batFile:write('"' .. sevenZip .. '" u "' .. mizPath .. '" mission > "' .. workDir .. '7zRepackOutput.log" 2>&1\r\n')
+    batFile:write('"' .. sevenZip .. '" u "' .. stagingMiz .. '" mission > "' .. workDir .. '7zRepackOutput.log" 2>&1\r\n')
     batFile:write('echo EXITCODE=%ERRORLEVEL% >> "' .. workDir .. '7zRepackOutput.log"\r\n')
     batFile:write('exit /b %ERRORLEVEL%\r\n')
     batFile:close()
 
     local repackResult = os.execute('"' .. batPath .. '"')
-    log("Repack into " .. mizPath .. " result: " .. tostring(repackResult))
+    log("Repack into staging copy result: " .. tostring(repackResult))
     if repackResult ~= 0 and repackResult ~= true then
-        log("ERROR: repack failed for " .. mizPath .. " - check " .. workDir .. "7zRepackOutput.log")
+        log("ERROR: repack failed on staging copy for " .. mizPath .. " - check " .. workDir .. "7zRepackOutput.log")
         return false
     end
 
-    log("SUCCESS: " .. mizPath .. " randomized and ready to load")
+    if not verifyMiz(stagingMiz) then
+        log("ERROR: integrity check FAILED on staging copy for " .. mizPath .. " - check " .. workDir .. "7zTestOutput.log")
+        return false
+    end
+
+    local commitOk, commitErr = copyFile(stagingMiz, mizPath)
+    if not commitOk then
+        log("ERROR: verified staging copy could not be committed to " .. mizPath .. " - " .. tostring(commitErr))
+        return false
+    end
+
+    log("SUCCESS: " .. mizPath .. " randomized, verified, and committed")
     return true
+end
+
+local function randomizeInPlace(mizPath)
+    os.execute('mkdir "' .. workDir .. '" 2>nul')
+    if not verifyMiz(mizPath) then
+        log("ERROR: source mission file " .. mizPath .. " already fails integrity check BEFORE any patching - skipping randomization, live file left untouched")
+        return false
+    end
+
+    for attempt = 1, maxAttempts do
+        log("Attempt " .. attempt .. " of " .. maxAttempts .. " for " .. mizPath)
+        if buildAndVerify(mizPath) then
+            return true
+        end
+        log("WARNING: attempt " .. attempt .. " failed for " .. mizPath)
+    end
+
+    log("ERROR: all " .. maxAttempts .. " attempts failed for " .. mizPath .. " - live file left untouched")
+    return false
 end
 
 
@@ -281,6 +322,7 @@ local handler = {}
 
 function handler.onSimulationStart()
     local inactive = getInactiveMission()
+    log("------------------------------------------------------------")
     log("Current Session Active")
     log("Staging alternate mission: ".. inactive)
 
