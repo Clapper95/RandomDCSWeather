@@ -6,13 +6,17 @@
 
         For instance, your current server has one set of Dynamic weather or is set to Static. This script will move weather into a randomized weather set each time the server resets.
 
+    **Prerequisite**
+        SpecialK DCSServerBot or Similar needs to be installed on your server to auto-rotate missions.
+
     **INSTALL**
         1. Requires 7Zip to be installed on the server. (https://7-zip.org/)
             Update the sevenZip variable below to where 7z.exe is install if not default path
-        2. Make a copy of your mission and rename it (example mission_b.miz) and then add it to the missionB variable. Mission A is the other miz file that you copied from. 
-        3. Set serverSettingPath to where your serverSettings.lua is located
-        3. Copy this file into user\Saved Games\DCS\Scripts\Hooks
-        4. Restart your server once to load the hook. From then on, every mission stop generates a new weather set and start time for the NEXT restart.
+        2. Make a copy of your mission and rename it (example mission_b.miz)
+        3. Add the copy of your mission to your missionList in serverSettings.lua
+        4. Set serverSettingPath to where your serverSettings.lua is located
+        5. Copy this file into user\Saved Games\DCS\Scripts\Hooks
+        6. Restart your server once to load the hook. From then on, every mission stop generates a new weather set and start time for the NEXT restart.
 
     **Notes**
             This only changes individual fields. wind, groundTurbulance, qnh, clouds, season/temperature, and start_time. It does not touch anything fog related as fog should be set to AUTO in the mission editor if you wish to have fog.
@@ -24,9 +28,7 @@
 --]]
 
 local sevenZip    = [[C:\Program Files\7-Zip\7z.exe]]
-local missionA    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz.miz]]
-local missionB    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz_b.miz]]
-local serverSettingPath = [[C:\Users\YourUser\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
+local serverSettingPath = [[C:\Users\Your User\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
 local workDir     = (lfs and lfs.writedir() or os.getenv("TEMP") .. "\\") .. "randomizeWeatherTMP\\"
 local maxAttempts = 2
 
@@ -260,71 +262,85 @@ local function randomizeInPlace(mizPath)
     return false
 end
 
+-- Read missionList from serverSettings.lua
+local function baseName(path)
+    return path:match("([^\\/]+)$") or path
+end
+
+local function readMissionList()
+    local f = io.open(serverSettingPath, "rb")
+    if not f then
+        log("ERROR: Could not open serverSettings.lua for reading missionList")
+        log("CHECK: Is serverSettingPath set correctly?")
+        return nil
+    end
+    local text = f:read("*a")
+    f:close()
+
+    local block = text:match('%[?"?missionList"?%]?%s*=%s*(%b{})')
+    if not block then
+        log("ERROR: Could not locate mission list in serverSettings.lua")
+        return nil
+    end 
+
+    local missions = {}
+    for path in block:gmatch('"(.-)"') do
+        table.insert(missions, (path:gsub('\\\\', '\\')))
+    end
+
+    if #missions < 2 then
+        log("ERROR: missionList MUST contain at least 2 entries")
+        return nil
+    end
+
+    return missions
+end
+
 
 -- Selects the mission file that is not currently active.
 local function getInactiveMission()
+    local missions = readMissionList()
+    if not missions then
+        return nil
+    end
+
     local ok, current = pcall(function() return DCS.getMissionFilename() end)
-    if ok and current then
-        local lower = string.lower(current)
-        if string.find(lower, "_b%.miz") then
-            return missionA
+    local currentBase = (ok and current) and baseName(current):lower() or nil
+
+    if not currentBase then
+        log("WARNING: could not determine the active mission filename. Skipping randomization.")
+        return nil
+    end
+
+    for _, path in ipairs(missions) do
+        if baseName(path):lower() ~= currentBase then
+            return path
         end
     end
-    return missionB
+
+    log("WARNING: Active mission not found in missionList. Skipping randomization.")
+
+    return nil 
 end
 
 
 -- Hook reg
 
-local function setNextMission(missionPath)
-    local f = io.open(serverSettingPath, "rb")
-    if not f then
-        log("ERROR: could not find serverSettings.lua")
-        return false
-    end
-
-    local text = f:read("*a")
-    f:close()
-
-    local escapedPath = missionPath:gsub("\\", "\\\\")
-    local pattern = '(%["missionList"%]%s*=%s*)({.-})(%s*,)'
-
-    local prefix, missionList, comma = text:match(pattern)
-
-    if not prefix then
-        log("ERROR: could not locate the missionList in serverSettings.lua")
-        return false
-    end
-
-    local newMissionList = '{\n' .. '\t\t[1] = "' .. escapedPath .. '",\n' .. '\t}'  
-    local replacement = prefix .. newMissionList .. comma
-
-    local updatedText, count = text:gsub(pattern, replacement, 1)
-    if count ~= 1 then
-        log("ERROR: could not updated missionList in serverSettings.lua")
-        return false
-    end
-
-    local outF = io.open(serverSettingPath, "wb")
-    if not outF then
-        log("ERROR: could not write serverSettings.lua")
-        return false
-    end
-
-    outF:write(updatedText)
-    outF:close()
-
-    log("SUCCESS: serverSettings.lua updated to " .. missionPath)
-
-    return true
-end
 local handler = {}
 
 function handler.onSimulationStart()
-    local inactive = getInactiveMission()
     log("------------------------------------------------------------")
     log("Current Session Active")
-    log("Staging alternate mission: ".. inactive)
+    
+    local ok, current = pcall(function() return DCS.getMissionFilename() end)
+    log("Active Session: " .. ((ok and current) and current or "unknown"))
+    local inactive = getInactiveMission()
+    if not inactive then
+        log("ERROR: Could not determine inactive mission // skipping randomization")
+        return
+    end
+
+    log("Staging alternate mission: " .. inactive)
 
     local backupPath = inactive .. ".bak"
     local bakOk, bakErr = copyFile(inactive, backupPath)
@@ -335,15 +351,9 @@ function handler.onSimulationStart()
 
     if not randomizeInPlace(inactive) then
         log("ERROR: staging failed for " .. inactive)
-        log("WARNING: serverSettings.lua will not be changed")
         return
     end
 
-    if not setNextMission(inactive) then
-        log("ERROR: mission staged successfully but serverSettings.lua has failed to updated")
-        log("WARNING: Next startup may still load the previous mission")
-        return
-    end
 
     log("SUCCESS: Next startup READY: " .. inactive)
 end

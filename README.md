@@ -6,15 +6,12 @@ Apply random weather in a configurable manner to your DCS mission upon restarts.
 
 Dependancies
 7-Zip https://www.7-zip.org/download.html
+DCSServerBot or Similar to auto rotate missions.
 
 -Configuration
-  - Make a copy of your current mission and add "_b" at the end. Example yourMission_b.miz
+  - Make a copy of your current mission and add "_b" at the end.
   
   - Set sevenZip if not in its default location of C:\Program Files\7-Zip\7z.exe
-  
-  - Set missionA to your mission. Example C:\Users\YourUser\Saved Games\DCS\Missions\yourMission.miz
-  
-  - Set missionB to the copy you made. Example C:\Users\YourUser\Saved Games\DCS\Missions\yourMission_b.miz
   
   - Set serverSettingPath to where your serverSettings.lua is. Example C:\Users\YourUser\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua
   
@@ -27,5 +24,8 @@ Dependancies
   - Set year in the function buildDateAndTime() (Line 108)
 
 - Installation
+  - Add both missions to your missionList (Main and Main_B) in serverSettings.lua or the server manager.
   - Drop this file into DCS World Server\Scripts\Hooks
+  - Configure as needed
   - Restart your server to load
+  - On next restart, you'll have random weather and time.
