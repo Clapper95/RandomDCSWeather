@@ -1,10 +1,21 @@
 --[[
     randWeatherAlternate.lua
+    Purpose of creation:
+        I wanted to provide an alternative to realWeather, a plugin for DCSServerBot. The goal was to make this randomly select weather conditions based off of chance instead of inputting 
+        an ICAO code and defining conditions when configuring the plugin. Thus, reducing configuration time.
 
     **What this script does**
         Every time the current mission stops (shutdown, mission restart, or mission end), this script will rewrite the weather and time of day into your configured mission file with randomized values. So each time the mission starts, new weather is set up.
 
         For instance, your current server has one set of Dynamic weather or is set to Static. This script will move weather into a randomized weather set each time the server resets.
+
+    **required**
+        1. DCSServerBot
+            We need to be able to automate rotation of missions. We are using this popular tool for that purpose.
+            You will need to configure DCSServerBot to do the following
+                On Restart, Rotate needs to be set in your scheduler.
+                Any weather and time related settings in MizEdit need to be deleted. Configure them here.
+                Turn OFF realWeather.
 
     **INSTALL**
         1. Requires 7Zip to be installed on the server. (https://7-zip.org/)
@@ -20,13 +31,15 @@
             This script automatically backs up your .miz so if anything were to happen you would have a fall back.
                 Each time this script runs, it first checks that the SOURCE .miz is not already corrupted. Then it builds and patches a disposable staging copy, and integrity-checks THAT copy with 7z before committing anything. 
                     The live .miz file is never opened for writing unless a verified-good staging copy is ready to replace it. If the source is already bad, or every attempt fails to produce a verified-good copy,
-                        the live .miz and serverSettings.lua are both left completely unchanged - nothing is auto-reverted, the previous configuration just stays in effect for the next restart. 
+                        the live .miz and serverSettings.lua are both left completely unchanged - nothing is auto-reverted, the previous configuration just stays in effect for the next restart.
+    
+    ///Future Plans\\\
+            I want to incorporate this in to DCSServerBot directly, and also offer a GUI to ease configuration and changes. This requires a full rewrite in Python (for the server plugin) and JS (for the GUI).
+            This will obviously take a lot of time and effort getting things to act right. So I want to see if this is something that is useful to people first.
 --]]
 
 local sevenZip    = [[C:\Program Files\7-Zip\7z.exe]]
-local missionA    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz.miz]]
-local missionB    = [[C:\Users\YourUser\Saved Games\DCS\Missions\yourmiz_b.miz]]
-local serverSettingPath = [[C:\Users\YourUser\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
+local serverSettingPath = [[C:\Users\Administrator\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
 local workDir     = (lfs and lfs.writedir() or os.getenv("TEMP") .. "\\") .. "randomizeWeatherTMP\\"
 local maxAttempts = 2
 
@@ -72,12 +85,12 @@ local function buildWeather()
     return {
         wind = string.format(
             '["wind"] =\n    {\n        ["at8000"] = { ["speed"] = %d, ["dir"] = %d, },\n        ["at2000"] = { ["speed"] = %d, ["dir"] = %d, },\n        ["atGround"] = { ["speed"] = %d, ["dir"] = %d, },\n    },',
-            rnd(0, 25), rnd(0, 359),
-            rnd(0, 15), rnd(0, 359),
-            rnd(0, 8),  rnd(0, 359)
+            rnd(15, 25), rnd(250,290),
+            rnd(8, 15), rnd(250,270),
+            rnd(6, 8),  rnd(200,250)
         ),
         turbulence = string.format('["groundTurbulence"] = %d,', rnd(0, 10)),
-        qnh        = string.format('["qnh"] = %d,', rnd(720, 790)),
+        qnh        = string.format('["qnh"] = %d,', rnd(745, 775)),
         clouds     = string.format(
             '["clouds"] = { ["thickness"] = %d, ["density"] = %d, ["base"] = %d, ["iprecptns"] = %d, },',
             thickness, density, base, iprecptns
@@ -104,8 +117,8 @@ local function buildDateAndTime()
 {
     ["Day"] = %d,
     ["Month"] = %d,
-    ["Year"] = 2014, 
-},]], rnd(1, 28), rnd(1, 12))
+    ["Year"] = 2028, 
+},]], rnd(5, 7), rnd(9, 9))
 
     local startTimeLine = string.format('["start_time"] = %d,', pickStartTime())
 
@@ -125,7 +138,7 @@ local function patchMissionText(text)
         {"clouds",      '%["clouds"%]%s*=%s*%b{},',          w.clouds},
         {"season",      '%["season"%]%s*=%s*%b{},',          w.season},
         {"date",        '%["date"%]%s*=%s*%b{},',            dateBlock},
-        {"start_time",  '%["start_time"%]%s*=%s*%d+,',       startTimeLine},
+        {"start_time",  '\n\t%["start_time"%]%s*=%s*%d+,', '\n\t' .. startTimeLine},
     }
 
     local counts = {}
@@ -164,6 +177,37 @@ local function verifyMiz(mizPath)
     return testResult == 0 or testResult == true
 end
 
+local function getDcssbPaths(mizPath)
+    local dir, file = mizPath:match("(.*)\\([^\\]+)$")
+    if not dir then return nil end
+    local dcssbDir = dir .. "\\.dcssb"
+    return dcssbDir, dcssbDir .. "\\" .. file, dcssbDir .. "\\" .. file .. ".orig"
+end
+ 
+local function propagateToDcssb(mizPath, sourcePath)
+    local dcssbDir, workingCopy, origCopy = getDcssbPaths(mizPath)
+    if not dcssbDir then
+        log("WARNING: could not derive .dcssb path for " .. mizPath)
+        return
+    end
+ 
+    os.execute('mkdir "' .. dcssbDir .. '" 2>nul')
+ 
+    local wOk, wErr = copyFile(sourcePath, workingCopy)
+    if wOk then
+        log("SUCCESS: propagated to .dcssb working copy: " .. workingCopy)
+    else
+        log("WARNING: could not update .dcssb working copy " .. workingCopy .. " - " .. tostring(wErr))
+    end
+ 
+    local oOk, oErr = copyFile(sourcePath, origCopy)
+    if oOk then
+        log("SUCCESS: propagated to .dcssb .orig copy: " .. origCopy)
+    else
+        log("WARNING: could not update .dcssb .orig copy " .. origCopy .. " - " .. tostring(oErr))
+    end
+end
+ 
 local function buildAndVerify(mizPath)
     local stagingMiz = workDir .. "staging.miz"
     os.remove(stagingMiz)
@@ -172,32 +216,32 @@ local function buildAndVerify(mizPath)
         log("ERROR: could not create a staging copy")
         return false
     end
-
+ 
     local missionPath = workDir .. "mission"
     os.remove(missionPath)
-        local extractCmd = string.format('""%s" e -y -o"%s" "%s" mission"', sevenZip, workDir, stagingMiz)
+    local extractCmd = string.format('""%s" e -y -o"%s" "%s" mission"', sevenZip, workDir, stagingMiz)
     local extractResult = os.execute(extractCmd)
     log("Extract from staging copy result: " .. tostring(extractResult))
     if extractResult ~= 0 and extractResult ~= true then
         log("ERROR: extraction failed from staging copy of " .. mizPath)
         return false
     end
-
-        local f = io.open(missionPath, "rb")
+ 
+    local f = io.open(missionPath, "rb")
     if not f then
         log("ERROR: could not open extracted mission at " .. missionPath)
         return false
     end
     local text = f:read("*a")
     f:close()
-
+ 
     local patched, counts = patchMissionText(text)
     local summary = {}
     for _, name in ipairs({"wind", "turbulence", "qnh", "clouds", "season", "date", "start_time"}) do
         table.insert(summary, name .. "=" .. counts[name])
     end
     log("Patch match counts for " .. mizPath .. " (expect 1 each): " .. table.concat(summary, ", "))
-
+ 
     local outF = io.open(missionPath, "wb")
     if not outF then
         log("ERROR: could not write patched mission")
@@ -205,7 +249,7 @@ local function buildAndVerify(mizPath)
     end
     outF:write(patched)
     outF:close()
-
+ 
     local batPath = workDir .. "repack.bat"
     local batFile = io.open(batPath, "w")
     if not batFile then
@@ -218,28 +262,33 @@ local function buildAndVerify(mizPath)
     batFile:write('echo EXITCODE=%ERRORLEVEL% >> "' .. workDir .. '7zRepackOutput.log"\r\n')
     batFile:write('exit /b %ERRORLEVEL%\r\n')
     batFile:close()
-
+ 
     local repackResult = os.execute('"' .. batPath .. '"')
     log("Repack into staging copy result: " .. tostring(repackResult))
     if repackResult ~= 0 and repackResult ~= true then
         log("ERROR: repack failed on staging copy for " .. mizPath .. " - check " .. workDir .. "7zRepackOutput.log")
         return false
     end
-
+ 
     if not verifyMiz(stagingMiz) then
         log("ERROR: integrity check FAILED on staging copy for " .. mizPath .. " - check " .. workDir .. "7zTestOutput.log")
         return false
     end
-
+ 
     local commitOk, commitErr = copyFile(stagingMiz, mizPath)
     if not commitOk then
         log("ERROR: verified staging copy could not be committed to " .. mizPath .. " - " .. tostring(commitErr))
         return false
     end
-
+ 
     log("SUCCESS: " .. mizPath .. " randomized, verified, and committed")
+ 
+    -- Also propagate into .dcssb, in case that's what governs the reset-to state
+    propagateToDcssb(mizPath, stagingMiz)
+ 
     return true
 end
+
 
 local function randomizeInPlace(mizPath)
     os.execute('mkdir "' .. workDir .. '" 2>nul')
@@ -260,71 +309,85 @@ local function randomizeInPlace(mizPath)
     return false
 end
 
+-- Read missionList from serverSettings.lua
+local function baseName(path)
+    return path:match("([^\\/]+)$") or path
+end
+
+local function readMissionList()
+    local f = io.open(serverSettingPath, "rb")
+    if not f then
+        log("ERROR: Could not open serverSettings.lua for reading missionList")
+        log("CHECK: Is serverSettingPath set correctly?")
+        return nil
+    end
+    local text = f:read("*a")
+    f:close()
+
+    local block = text:match('%[?"?missionList"?%]?%s*=%s*(%b{})')
+    if not block then
+        log("ERROR: Could not locate mission list in serverSettings.lua")
+        return nil
+    end 
+
+    local missions = {}
+    for path in block:gmatch('"(.-)"') do
+        table.insert(missions, (path:gsub('\\\\', '\\')))
+    end
+
+    if #missions < 2 then
+        log("ERROR: missionList MUST contain at least 2 entries")
+        return nil
+    end
+
+    return missions
+end
+
 
 -- Selects the mission file that is not currently active.
 local function getInactiveMission()
+    local missions = readMissionList()
+    if not missions then
+        return nil
+    end
+
     local ok, current = pcall(function() return DCS.getMissionFilename() end)
-    if ok and current then
-        local lower = string.lower(current)
-        if string.find(lower, "_b%.miz") then
-            return missionA
+    local currentBase = (ok and current) and baseName(current):lower() or nil
+
+    if not currentBase then
+        log("WARNING: could not determine the active mission filename. Skipping randomization.")
+        return nil
+    end
+
+    for _, path in ipairs(missions) do
+        if baseName(path):lower() ~= currentBase then
+            return path
         end
     end
-    return missionB
+
+    log("WARNING: Active mission not found in missionList. Skipping randomization.")
+
+    return nil 
 end
 
 
 -- Hook reg
 
-local function setNextMission(missionPath)
-    local f = io.open(serverSettingPath, "rb")
-    if not f then
-        log("ERROR: could not find serverSettings.lua")
-        return false
-    end
-
-    local text = f:read("*a")
-    f:close()
-
-    local escapedPath = missionPath:gsub("\\", "\\\\")
-    local pattern = '(%["missionList"%]%s*=%s*)({.-})(%s*,)'
-
-    local prefix, missionList, comma = text:match(pattern)
-
-    if not prefix then
-        log("ERROR: could not locate the missionList in serverSettings.lua")
-        return false
-    end
-
-    local newMissionList = '{\n' .. '\t\t[1] = "' .. escapedPath .. '",\n' .. '\t}'  
-    local replacement = prefix .. newMissionList .. comma
-
-    local updatedText, count = text:gsub(pattern, replacement, 1)
-    if count ~= 1 then
-        log("ERROR: could not updated missionList in serverSettings.lua")
-        return false
-    end
-
-    local outF = io.open(serverSettingPath, "wb")
-    if not outF then
-        log("ERROR: could not write serverSettings.lua")
-        return false
-    end
-
-    outF:write(updatedText)
-    outF:close()
-
-    log("SUCCESS: serverSettings.lua updated to " .. missionPath)
-
-    return true
-end
 local handler = {}
 
 function handler.onSimulationStart()
-    local inactive = getInactiveMission()
     log("------------------------------------------------------------")
     log("Current Session Active")
-    log("Staging alternate mission: ".. inactive)
+    
+    local ok, current = pcall(function() return DCS.getMissionFilename() end)
+    log("Active Session: " .. ((ok and current) and current or "unknown"))
+    local inactive = getInactiveMission()
+    if not inactive then
+        log("ERROR: Could not determine inactive mission // skipping randomization")
+        return
+    end
+
+    log("Staging alternate mission: " .. inactive)
 
     local backupPath = inactive .. ".bak"
     local bakOk, bakErr = copyFile(inactive, backupPath)
@@ -335,15 +398,9 @@ function handler.onSimulationStart()
 
     if not randomizeInPlace(inactive) then
         log("ERROR: staging failed for " .. inactive)
-        log("WARNING: serverSettings.lua will not be changed")
         return
     end
 
-    if not setNextMission(inactive) then
-        log("ERROR: mission staged successfully but serverSettings.lua has failed to updated")
-        log("WARNING: Next startup may still load the previous mission")
-        return
-    end
 
     log("SUCCESS: Next startup READY: " .. inactive)
 end
