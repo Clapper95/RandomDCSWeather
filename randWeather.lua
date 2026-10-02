@@ -20,10 +20,11 @@
     **INSTALL**
         1. Requires 7Zip to be installed on the server. (https://7-zip.org/)
             Update the sevenZip variable below to where 7z.exe is install if not default path
-        2. Make a copy of your mission and rename it (example mission_b.miz) and then add it to the missionB variable. Mission A is the other miz file that you copied from. 
-        3. Set serverSettingPath to where your serverSettings.lua is located
-        3. Copy this file into user\Saved Games\DCS\Scripts\Hooks
-        4. Restart your server once to load the hook. From then on, every mission stop generates a new weather set and start time for the NEXT restart.
+        2. Make a copy of your mission and rename it (example mission_b.miz)
+        3. Add the copy of your mission to your missionList in serverSettings.lua
+        4. Set serverSettingPath to where your serverSettings.lua is located
+        5. Copy this file into user\Saved Games\DCS\Scripts\Hooks
+        6. Restart your server once to load the hook. From then on, every mission stop generates a new weather set and start time for the NEXT restart.
 
     **Notes**
             This only changes individual fields. wind, groundTurbulance, qnh, clouds, season/temperature, and start_time. It does not touch anything fog related as fog should be set to AUTO in the mission editor if you wish to have fog.
@@ -39,7 +40,7 @@
 --]]
 
 local sevenZip    = [[C:\Program Files\7-Zip\7z.exe]]
-local serverSettingPath = [[C:\Users\Administrator\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
+local serverSettingPath = [[C:\Users\YourUser\Saved Games\DCS.dcs_serverrelease\Config\serverSettings.lua]]
 local workDir     = (lfs and lfs.writedir() or os.getenv("TEMP") .. "\\") .. "randomizeWeatherTMP\\"
 local maxAttempts = 2
 
@@ -315,8 +316,17 @@ local function baseName(path)
 end
 
 local function readMissionList()
+-- Read missionList from serverSettings.lua
+local function baseName(path)
+    return path:match("([^\\/]+)$") or path
+end
+
+local function readMissionList()
     local f = io.open(serverSettingPath, "rb")
     if not f then
+        log("ERROR: Could not open serverSettings.lua for reading missionList")
+        log("CHECK: Is serverSettingPath set correctly?")
+        return nil
         log("ERROR: Could not open serverSettings.lua for reading missionList")
         log("CHECK: Is serverSettingPath set correctly?")
         return nil
@@ -324,6 +334,31 @@ local function readMissionList()
     local text = f:read("*a")
     f:close()
 
+    local block = text:match('%[?"?missionList"?%]?%s*=%s*(%b{})')
+    if not block then
+        log("ERROR: Could not locate mission list in serverSettings.lua")
+        return nil
+    end 
+
+    local missions = {}
+    for path in block:gmatch('"(.-)"') do
+        table.insert(missions, (path:gsub('\\\\', '\\')))
+    end
+
+    if #missions < 2 then
+        log("ERROR: missionList MUST contain at least 2 entries")
+        return nil
+    end
+
+    return missions
+end
+
+
+-- Selects the mission file that is not currently active.
+local function getInactiveMission()
+    local missions = readMissionList()
+    if not missions then
+        return nil
     local block = text:match('%[?"?missionList"?%]?%s*=%s*(%b{})')
     if not block then
         log("ERROR: Could not locate mission list in serverSettings.lua")
@@ -366,9 +401,29 @@ local function getInactiveMission()
     end
 
     log("WARNING: Active mission not found in missionList. Skipping randomization.")
+    local ok, current = pcall(function() return DCS.getMissionFilename() end)
+    local currentBase = (ok and current) and baseName(current):lower() or nil
+
+    if not currentBase then
+        log("WARNING: could not determine the active mission filename. Skipping randomization.")
+        return nil
+    end
+
+    for _, path in ipairs(missions) do
+        if baseName(path):lower() ~= currentBase then
+            return path
+        end
+    end
+
+    log("WARNING: Active mission not found in missionList. Skipping randomization.")
 
     return nil 
+    return nil 
 end
+
+
+-- Hook reg
+
 
 
 -- Hook reg
@@ -378,6 +433,16 @@ local handler = {}
 function handler.onSimulationStart()
     log("------------------------------------------------------------")
     log("Current Session Active")
+    
+    local ok, current = pcall(function() return DCS.getMissionFilename() end)
+    log("Active Session: " .. ((ok and current) and current or "unknown"))
+    local inactive = getInactiveMission()
+    if not inactive then
+        log("ERROR: Could not determine inactive mission // skipping randomization")
+        return
+    end
+
+    log("Staging alternate mission: " .. inactive)
     
     local ok, current = pcall(function() return DCS.getMissionFilename() end)
     log("Active Session: " .. ((ok and current) and current or "unknown"))
